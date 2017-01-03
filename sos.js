@@ -10,17 +10,27 @@ OSError.OSCriticalError = class extends OSError {};
 
 /// Base class for OS processes, must be inherited from.
 class Process {
+    /// Predefined status enumeration
+    static get STATUS() { return { DEAD: 0, ALIVE: 1, ASLEEP: 2 }; }
+
     /// Constructor called every tick by OS
     constructor(oscfg) {
         oscfg = oscfg || {};
         this.chs_ = (oscfg.children || []).slice(0);
+        this.pid_ = oscfg.pid;
     }
 
-    /// Returns list of child processes' PIDs
+    /// List of child processes' PIDs
     get children() { return this.chs_.slice(0); }
 
+    /// Own PID
+    get pid() { return this.pid_; }
+
     /// Default generator, example, detects missed (not registered) Process classes
-    *run() {  throw new OSError.OSCriticalError('Abstract Process.*run() was called');  }
+    *run() {
+        const str = `${this.constructor.name}`;
+        throw new OSError.OSCriticalError('Abstract Process.*run() was called by '+str);
+    }
 }
 
 const utils = {
@@ -34,9 +44,7 @@ const utils = {
     isConvertibleToGF: ((obj) => (utils.isGeneratorFunction(obj) || (typeof obj == 'function'))),
     generify: ((g) => (utils.isGeneratorFunction(g) ? g : (function*(...args) { return g(...args) }))),
     unrollGenerator: ((f, ...args) => {
-        const g = utils.isGenerator(f) ? f :
-            utils.isGeneratorFunction(f) ? f(...args) :
-            utils.generify(f)(...args);
+        const g = utils.isGenerator(f) ? f : utils.generify(f)(...args);
         for(let step of g) {}
     }),
     functionByName: ((name, context) => {
@@ -56,8 +64,8 @@ class Interrupt {
     /// Predefined percent powers for some actions
     static get POWER() { return { LOW: 10, MEDIUM: 50, HIGH: 90 }; }
 
-    /// Virtual fabric, allows "yield INT.XXX.create();" as "yield new INT.XXX();"
-    static create(... args) { return new this.constructor(...args); }
+    /// Virtual fabric, allows "yield INT.XXX.create();" as "yield new INT.XXX();" TODO not works
+    //static create(...args) { return new this.constructor(...args); }
 }
 
 /// Allows to interrupt process to be continued later this tick. Has no result.
@@ -72,7 +80,7 @@ Interrupt.Sleep = class extends Interrupt {
 Interrupt.Fork = class extends Interrupt {
     constructor(priority, type, memory) { super(); this.args = [priority, type, memory]; }; };
 
-/// Requests access to child process memory. Result: reference to child memory.
+/// Requests access to child process memory. Result: {status: s, memory: m}.
 Interrupt.Inject = class extends Interrupt {
     constructor(pid) { super(); this.cpid = pid; }; };
 
@@ -85,8 +93,9 @@ Interrupt.Reboot = class extends Interrupt {
     constructor() { super(); }; };
 
 /**
- * Main Kernel's singleton. Explicitly extended below.
- * Can be accesses by "Kernel()" or constructed as "new Kernel".
+ * Kernel's entity.
+ * Ordinary "class" (function), so several kernels can be constructed
+ * and operated simultaneously.
  */
 class Kernel {
     constructor(storage, time) {
@@ -95,15 +104,15 @@ class Kernel {
 
         /// Private ///
 
-        memory_.executed    = false;
-        memory_.t           = time || 1 + (memory_.t || 0);
-        memory_.table       = memory_.table || {};
+        memory_.executed = false;
+        memory_.t        = time || 1 + (memory_.t || 0);
+        memory_.table    = memory_.table || {};
 
         console.log('Kernel constructed (t = %d, st = %s)', memory_.t, JSON.stringify(memory_));
 
-        const types     = {};
-        const table     = memory_.table;
-        const pidList  = _.chain(table).keys().sortBy(k => +k).value();
+        const types   = {};
+        const table   = memory_.table;
+        const pidList = Object.keys(table).sort(k => +k);
 
         const executed = () => (memory_.executed);
         const complete = () => (memory_.executed = true);
@@ -136,28 +145,39 @@ class Kernel {
                     delete task.yieldArg;
                     if(ret instanceof INT) {
                         switch(ret.constructor) {
+
                             case INT.Yield:
                                 interrupt = (ret.density + task.priority/2) < _.random(0,100);
-                                console.log(`### YIELD(${task.entry[0]}) ###`);
+                                //console.log(`### YIELD(${task.entry[0]}) ###`);
                                 break;
+
                             case INT.Sleep: // TODO: timing
-                                interrupt = true;
+                                result.done = true;
                                 break;
+
                             case INT.Fork:
                                 const newPID = acquireFreePID();
-                                if(createProcess(newPID, ...ret.args))
+                                if(createProcess(newPID, ...ret.args)) {
                                     task.entry[4].push(newPID);
-                                task.yieldArg = newPID;
+                                    task.yieldArg = newPID;
+                                }
                                 break;
-                            case INT.Inject:
-                                if(!_.includes(task.thread.children, ret.cpid))
-                                    task.throw(new OSError('Access denied'));
-                                task.yieldArg = table[ret.cpid][3];
+
+                            case INT.Inject: // TODO: status
+                                if(!task.process.children.includes(ret.cpid))
+                                    task.thread.throw(new OSError('Access denied'));
+                                const childEntry = table[ret.cpid];
+                                task.yieldArg = {
+                                    status: (childEntry ? Process.STATUS.ALIVE : Process.STATUS.DEAD),
+                                    memory: (childEntry ? childEntry[3] : {}),
+                                };
                                 break;
+
                             case INT.Kill:
                                 delete table[task.entry[0]];
                                 result.done = true;
                                 break;
+
                             case INT.Reboot:
                                 reboot();
                                 result.done = true;
@@ -176,7 +196,13 @@ class Kernel {
 
         /// Privileged ///
 
-        this.register_ = (processType) => (types[processType.name] = processType);
+        this.register_ = (processType) => {
+            const exists = types[processType.name];
+            if(!exists) types[processType.name] = processType;
+            else if(exists !== processType) throw new OSError.OSCriticalError('Processes types names collision');
+        };
+
+
         this.exists_   = (pid) => (table[pid] !== undefined);
         this.runCore_  = (...args) => (createProcess(...args));
         this.execute_  = () => {
@@ -189,7 +215,7 @@ class Kernel {
             const schedule = _.chain(table)
                 .map((entry) => {
                     const priority  = adjPriority(entry[1]);
-                    const oscfg     = { children: entry[4].slice(0) };
+                    const oscfg     = { children: entry[4].slice(0), pid: entry[0] };
                     const process   = new (types[entry[2]] || Process)(oscfg);
                     const generator = utils.generify(process.run.bind(process))(entry[3]);
                     return {
@@ -207,7 +233,7 @@ class Kernel {
 
             try {
                 while(!executed()) {
-                    _.forEach(schedule, task => handleTask(task));
+                    schedule.forEach(task => handleTask(task));
                     _.remove(schedule, task => task.done);
                     if(schedule.length === 0) complete();
                 }
@@ -239,24 +265,71 @@ class Kernel {
 
 /**
  * Wraps OS calls by bulletproof shell.
- * @param f - function to be executed.
+ * @param f - function to be executed
+ * @param args - ... and its arguments
  */
-const sandbox = (f) => {
-    try {
-        f();
-    } catch(err) {
-        console.log('### Kernel panic: OS terminated for current tick ###');
-        console.log('%s %s', JSON.stringify(err), err.stack);
+const sandbox = (f, ...args) => {
+    try { f(...args); }
+    catch(err) {
+        console.log("### Kernel panic: current environment's OS terminated ###\n%s %s",
+            JSON.stringify(err), err.stack);
     }
 };
 
+/// Main OS singleton, static class
+const OS = (()=>{
+    let kernel_;
+    const processTypes = [];
+
+    class OS {
+        constructor() { throw new OSError.OSCriticalError("OS is static class, don't construct it"); }
+
+        /// Direct access to OS'es kernel
+        static get kernel() { return kernel_; }
+
+        /// Allows Processes registering before Kernel initialization
+        static register(type) {
+            if(OS.kernel) OS.kernel.register(type);
+            else processTypes.push(type);
+        }
+
+        /// Initializes OS'es kernel
+        static init(memory, time) {
+            if(kernel_) console.log('OS reinitialized, old kernel will be destroyed');
+            kernel_ = new Kernel(memory, time);
+            processTypes.forEach(t => kernel_.register(t));
+        };
+
+        /// Not necessary, see assignment below
+        // static core(...args) { OS.kernel.core(...args); }
+        // static execute(...args) { OS.kernel.execute(...args); }
+    }
+
+    const osProperties = Object.getOwnPropertyNames(OS);
+    const kernelProperties = Object.getOwnPropertyNames(Kernel.prototype);
+
+    /// OS <=> Kernel
+    for(let propName of kernelProperties) {
+        const ref = Kernel.prototype[propName];
+        if(!osProperties.includes(propName) && (typeof ref === 'function') && ref !== Kernel)
+            OS[propName] = ((...args)=>(OS.kernel[propName](...args)));
+    }
+
+    /// Full functional encapsulation
+    OS.OSError   = OSError;
+    OS.Process   = Process;
+    OS.Interrupt = Interrupt;
+    OS.INT       = Interrupt;
+
+    return OS;
+})();
+
 module.exports = (()=>{
     return {
-        utils:      utils,
         Process:    Process,
         Interrupt:  Interrupt,
-        INT:        Interrupt, // alias
         Kernel:     Kernel,
-        sandbox:    sandbox
+        sandbox:    sandbox,
+        OS:         OS
     };
 })();
