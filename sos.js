@@ -2,6 +2,27 @@
 
 const _ = require('lodash');
 
+/// Common OS errors
+class OSError extends Error {}
+
+/// Critical errors, throwing will cause Kernel reboot
+OSError.OSCriticalError = class extends OSError {};
+
+/// Base class for OS processes, must be inherited from.
+class Process {
+    /// Constructor called every tick by OS
+    constructor(oscfg) {
+        oscfg = oscfg || {};
+        this.chs_ = (oscfg.children || []).slice(0);
+    }
+
+    /// Returns list of child processes' PIDs
+    get children() { return this.chs_.slice(0); }
+
+    /// Default generator, example, detects missed (not registered) Process classes
+    *run() {  throw new OSError.OSCriticalError('Abstract Process.*run() was called');  }
+}
+
 const utils = {
     isGenerator: ((obj) => ('function' == typeof obj.next && 'function' == typeof obj.throw)),
     isGeneratorFunction: ((obj) => {
@@ -11,9 +32,7 @@ const utils = {
             utils.isGenerator(ctor.prototype);
     }),
     isConvertibleToGF: ((obj) => (utils.isGeneratorFunction(obj) || (typeof obj == 'function'))),
-    generify: ((g) => (
-        utils.isGeneratorFunction(g) ? g : (function*(...args) { return g(...args) })
-    )),
+    generify: ((g) => (utils.isGeneratorFunction(g) ? g : (function*(...args) { return g(...args) }))),
     unrollGenerator: ((f, ...args) => {
         const g = utils.isGenerator(f) ? f :
             utils.isGeneratorFunction(f) ? f(...args) :
@@ -29,27 +48,6 @@ const utils = {
     })
 };
 
-/// Common OS errors
-class OSError extends Error {}
-
-/// Critical errors, throwing will cause Kernel reboot
-class OSCriticalError extends OSError {}
-
-/// Base class for OS processes, must be inherited from.
-class Process {
-    /// Creates 'Process' from given POD object
-    constructor(pod) {
-        if(pod && pod.chs_ !== undefined) _.assignIn(this, pod); // "revive"
-        else this.chs_  = []; // newly created
-    }
-
-    /// Returns list of child processes' PIDs
-    get children() { return this.chs_.slice(0); }
-
-    /// Default generator, example, uses for missed (not registered) Process classes detection
-    *run(memory) { throw new OSError('Abstract Process.*run() was called'); }
-}
-
 /**
  * Base class and namespace of OS's "interrupts".
  * Return or yield "new Interrupt.<INT>()" inside Process will cause special actions.
@@ -57,6 +55,9 @@ class Process {
 class Interrupt {
     /// Predefined percent powers for some actions
     static get POWER() { return { LOW: 10, MEDIUM: 50, HIGH: 90 }; }
+
+    /// Virtual fabric, allows "yield INT.XXX.create();" as "yield new INT.XXX();"
+    static create(... args) { return new this.constructor(...args); }
 }
 
 /// Allows to interrupt process to be continued later this tick. Has no result.
@@ -69,7 +70,7 @@ Interrupt.Sleep = class extends Interrupt {
 
 /// Creates new process (will start next tick). Result: child PID.
 Interrupt.Fork = class extends Interrupt {
-    constructor(priority, type, ...args) { super(); this.spares = [priority, type, ...args]; }; };
+    constructor(priority, type, memory) { super(); this.args = [priority, type, memory]; }; };
 
 /// Requests access to child process memory. Result: reference to child memory.
 Interrupt.Inject = class extends Interrupt {
@@ -87,180 +88,165 @@ Interrupt.Reboot = class extends Interrupt {
  * Main Kernel's singleton. Explicitly extended below.
  * Can be accesses by "Kernel()" or constructed as "new Kernel".
  */
-const Kernel = (()=>{
-    let instance;
-    return function Construct() {
-        if(instance) return instance;
-        if(this && this.constructor === Construct) instance = this;
-        return new Construct();
-    };
-})();
+class Kernel {
+    constructor(storage, time) {
+        // Setting reference to storage object
+        const memory_ = storage || (()=>{ throw new OSError.OSCriticalError('Undefined storage') })();
 
-/// Returns "true" and handles error if its OS'es one, "false" otherwise.
-function handleError(err) {
-    if(err instanceof OSError) {
-        console.log('OS error: %s %s', JSON.stringify(err), err.stack);
-        return !(err instanceof OSCriticalError) || Kernel().reboot() || true;
-    }
-    return false;
-}
+        /// Private ///
 
-/**
- * Registers given class to be used at current runtime:
- * @param type - Process class
- */
-Kernel.prototype.register = (type) => ((Kernel().types || (Kernel().types = {}))[type.name] = type);
+        memory_.executed    = false;
+        memory_.t           = time || 1 + (memory_.t || 0);
+        memory_.table       = memory_.table || {};
 
-/// Initializes kernel's storage, allows execution
-Kernel.prototype.init = (storage, time) => {
-    this.executed_ = false;
-    this.memory = storage.kernel_ || (storage.kernel_ = {});
-    this.memory.t = time || 1 + (this.memory.t || 0);
-    console.log('Kernel constructed (st = %s)', JSON.stringify(this.memory));
-};
+        console.log('Kernel constructed (t = %d, st = %s)', memory_.t, JSON.stringify(memory_));
 
-Kernel.prototype.reboot = () => (this.executed_ = true);
+        const types     = {};
+        const table     = memory_.table;
+        const pidList  = _.chain(table).keys().sortBy(k => +k).value();
 
-Kernel.prototype.dump = () => (JSON.stringify(this));
+        const executed = () => (memory_.executed);
+        const complete = () => (memory_.executed = true);
+        const reboot   = () => (complete());
 
-/**
- * Full table of existing processes:
- * [pid, priority, typeName, process, memory]
- */
-Kernel.prototype.table = () => (this.memory.table || (this.memory.table = {}));
-
-/// Returns first available free PID
-Kernel.prototype.getFreePID = () => {
-    this.keysList = this.keysList || _.chain(Kernel().table()).keys().sortBy(k => +k).value();
-    for(let i = 1;; ++i) {
-        const idx = i-1;
-        if(i != this.keysList[idx]) {
-            this.keysList.splice(idx, 0, i);
-            return i;
-        }
-    }
-};
-
-function createProcess(pid, priority, type, ...ctorArgs) {
-    const table = Kernel().table();
-    if(table[pid]) throw new OSError('PID already occupied');
-    let process;
-    try { process = new type(...ctorArgs); }
-    catch(err) {
-        if(!handleError(err)) throw err;
-        return false;
-    }
-    if(!(process instanceof Process)) throw new OSError('Cant create Process (incompatible type)');
-    if(!utils.isConvertibleToGF(process.run)) throw new OSError('Process.run is not a valid function(*)');
-    table[pid] = [pid, priority, type.name, process, {}];
-    return true;
-}
-
-/// Runs core (permanent) process with given name if doesn't exists
-Kernel.prototype.core = (name, priority, type, ...ctorArgs) => {
-    if(name == 0) throw new OSError('Deprecated PID(0) for core processes');
-    if(Kernel().table()[name]) return;
-    createProcess(name, priority, type, ...ctorArgs);
-};
-
-/// Modifies table's entry and constructs Process by POD if it's necessary
-function revive(entry) {
-    const process = entry[3];
-    if(!(process instanceof Process))
-        entry[3] = new (Kernel().types[entry[2]] || Process)(process);
-    return entry;
-}
-
-/**
- * Processes schedule entries.
- * @param task: [priority,entry,generator,done]
- */
-function handleProcess(task) {
-    const [p,e,g,] = task; // priority/entry/generator/done
-    const INT = Interrupt;
-    try {
-        let interrupt = false;
-        do {
-            const result = g.next();
-            const ret = result.value;
-            if(ret instanceof INT) {
-                switch(ret.constructor) {
-                    case INT.Yield:
-                        interrupt = (ret.density + p/2) < _.random(0,100);
-                        break;
-                    case INT.Sleep: // TODO: timing
-                        interrupt = true;
-                        break;
-                    case INT.Fork: // TODO: child PID to generator
-                        const newPID = Kernel().getFreePID();
-                        if(createProcess(newPID, ...ret.spares))
-                            e[3].chs_.push(newPID);
-                        break;
-                    case INT.Inject: // TODO
-                        break;
-                    case INT.Kill: // TODO: more abstract
-                        result.done = true;
-                        delete Kernel().table()[e[0]];
-                        break;
-                    case INT.Reboot:
-                        Kernel().reboot();
-                        interrupt = true;
-                        break;
+        const acquireFreePID = () => {
+            for(let i = 1;; ++i) {
+                const idx = i-1;
+                if(i != pidList[idx]) {
+                    pidList.splice(idx, 0, i);
+                    return i;
                 }
             }
-            task[3] = result.done;
-            interrupt = interrupt || result.done;
-        } while(!interrupt);
-    } catch(err) {
-        task[3] = true;
-        if(!handleError(err))
-            throw err;
+        };
+
+        const createProcess = (pid, priority, type, memory) => {
+            if(table[pid]) throw new OSError('PID already occupied');
+            if(!(type.prototype instanceof Process)) throw new OSError('Invalid Process class');
+            table[pid] = [pid, priority, type.name, (memory || {}), []];
+            return true;
+        };
+
+        const handleTask = (task) => {
+            const INT = Interrupt; // just an alias
+            try {
+                let interrupt = false;
+                do {
+                    const result = task.thread.next(task.yieldArg);
+                    const ret = result.value;
+                    delete task.yieldArg;
+                    if(ret instanceof INT) {
+                        switch(ret.constructor) {
+                            case INT.Yield:
+                                interrupt = (ret.density + task.priority/2) < _.random(0,100);
+                                console.log(`### YIELD(${task.entry[0]}) ###`);
+                                break;
+                            case INT.Sleep: // TODO: timing
+                                interrupt = true;
+                                break;
+                            case INT.Fork:
+                                const newPID = acquireFreePID();
+                                if(createProcess(newPID, ...ret.args))
+                                    task.entry[4].push(newPID);
+                                task.yieldArg = newPID;
+                                break;
+                            case INT.Inject:
+                                if(!_.includes(task.thread.children, ret.cpid))
+                                    task.throw(new OSError('Access denied'));
+                                task.yieldArg = table[ret.cpid][3];
+                                break;
+                            case INT.Kill:
+                                delete table[task.entry[0]];
+                                result.done = true;
+                                break;
+                            case INT.Reboot:
+                                reboot();
+                                result.done = true;
+                                break;
+                        }
+                    }
+                    task.done = result.done;
+                    interrupt = interrupt || result.done;
+                } while(!interrupt);
+            } catch(err) {
+                task.done = true;
+                if((err instanceof OSError.OSCriticalError) || !(err instanceof OSError))
+                    throw err;
+            }
+        };
+
+        /// Privileged ///
+
+        this.register_ = (processType) => (types[processType.name] = processType);
+        this.exists_   = (pid) => (table[pid] !== undefined);
+        this.runCore_  = (...args) => (createProcess(...args));
+        this.execute_  = () => {
+            if(executed()) return;
+
+            const rp = 10; // shuffle power coefficient: priority ~ priority + [-rp,+rp]
+            const adjPriority = (p) => (Math.round(_.random(-rp, +rp)*(50 - Math.abs(p - 50))/50.0) + p);
+
+            // [pid, priority, type.name, memory, children];
+            const schedule = _.chain(table)
+                .map((entry) => {
+                    const priority  = adjPriority(entry[1]);
+                    const oscfg     = { children: entry[4].slice(0) };
+                    const process   = new (types[entry[2]] || Process)(oscfg);
+                    const generator = utils.generify(process.run.bind(process))(entry[3]);
+                    return {
+                        priority:   priority,   // randomized priority
+                        process:    process,    // Process object
+                        thread:     generator,  // "thread"-like generator
+                        entry:      entry,      // back reference to table's entry
+                        done:       false       // finish flag
+                    };
+                })
+                .sortBy((obj) => (-obj.priority))
+                .value();
+
+            // Here schedule is sorted and prepared for execution
+
+            try {
+                while(!executed()) {
+                    _.forEach(schedule, task => handleTask(task));
+                    _.remove(schedule, task => task.done);
+                    if(schedule.length === 0) complete();
+                }
+            } catch(err) {
+                if(err instanceof OSError) {
+                    complete();
+                    console.log('Kernel panic: %s %s', err, err.stack);
+                }
+                else throw err;
+            }
+        };
     }
+
+    /**
+     * Registers given class to be used at current runtime:
+     * @param processType - Process class
+     */
+    register(processType) { this.register_(processType) }
+
+    /// Runs core (permanent) named process with given name if doesn't exists
+    core(name, priority, type, memory) {
+        if(name == 0) throw new OSError('Deprecated PID(0) for core processes');
+        if(this.exists_(name)) return;
+        this.runCore_(name, priority, type, memory);
+    }
+
+    execute() { this.execute_(); }
 }
-
-Kernel.prototype.execute = () => {
-    const executed = () => (this.executed_);
-    const complete = () => (this.executed_ = true);
-    if(executed()) return;
-
-    const rp = 10; // shuffle power coefficient: priority ~ priority + [-rp,+rp]
-    const adjPriority = (p) => (Math.round(_.random(-rp, +rp)*(50 - Math.abs(p - 50))/50.0) + p);
-
-    // [pid, priority, typeName, process, memory]
-    const schedule = _.chain(Kernel().table())
-        .map((entry) => ([
-            adjPriority(entry[1]),          // randomized priority
-            revive(entry),                  // table entry reference
-            utils.generify(entry[3].run)(entry[4]), // generator
-            false                           // done
-        ]))
-        .sortBy((obj) => (-obj[0]))
-        .value();
-
-    // Here schedule is sorted and prepared for execution
-
-    while(!executed()) {
-        _.forEach(schedule, task => handleProcess(task));
-        _.remove(schedule, s => s[3]);
-        if(schedule.length === 0) complete();
-    }
-};
 
 /**
  * Wraps OS calls by bulletproof shell.
  * @param f - function to be executed.
  */
-const environment = (f) => {
+const sandbox = (f) => {
     try {
         f();
     } catch(err) {
-        if(!handleError(err)) {
-            console.log('### Kernel panic: OS terminated for current tick ###');
-            console.log('%s %s', JSON.stringify(err), err.stack);
-        } else {
-            console.log('+++ Kernel warning: OS has handle some serious error +++');
-            console.log('%s %s', JSON.stringify(err), err.stack);
-        }
+        console.log('### Kernel panic: OS terminated for current tick ###');
+        console.log('%s %s', JSON.stringify(err), err.stack);
     }
 };
 
@@ -271,6 +257,6 @@ module.exports = (()=>{
         Interrupt:  Interrupt,
         INT:        Interrupt, // alias
         Kernel:     Kernel,
-        environment:environment
+        sandbox:    sandbox
     };
 })();
