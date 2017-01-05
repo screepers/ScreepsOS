@@ -1,0 +1,12 @@
+language: node_js
+
+node_js:
+  - "6"
+  - "iojs"
+
+before_install:
+  - "npm i -g npm"
+  - "npm i --save lodash"
+
+script:
+  - "node tests.js"

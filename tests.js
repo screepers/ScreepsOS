@@ -1,8 +1,7 @@
 'use strict';
 
 const _ = require('lodash');
-const sos = require('./sos.js');
-const OS = sos.OS;
+const OS = require('./sos.js').OS;
 
 global.jcon = (...args) => (console.log(JSON.stringify(...args)));
 
@@ -24,18 +23,21 @@ class Monitor extends OS.Process {
         jcon('m2');
 
         yield* printer();
-        memory.x = memory.x || 0;
-        ++memory.x;
+
+        memory.x = (memory.x || 0) + 1;
 
         jcon(this.children);
 
         if(this.children.length > 0) {
             const hook = yield new OS.INT.Inject(this.children[0]);
-            console.log('!!! child of %s = %s', this.pid, JSON.stringify(hook));
+            console.log(`!!! child of ${this.pid} = ${JSON.stringify(hook)}`);
         }
 
-        if(memory.x % 3 === 0 && this.children.length < 1)
+        if(memory.x % 3 === 2 && this.children.length < 1)
             yield new OS.INT.Fork(OS.INT.POWER.MEDIUM, Monitor);
+
+        if(memory.x % 5 === 4 && this.parent != 0)
+            yield new OS.INT.Kill();
     }//*/
 
     /*/! Non-generator function
@@ -50,19 +52,17 @@ class Monitor extends OS.Process {
 OS.register(Monitor);
 
 (function main() {
-    console.log("Hello!");
-    console.log("os =", sos);
-
-    sos.sandbox(()=>{
-        let Memory = {};
-        const ticks = 5;
+    OS.sandbox(()=>{
+        let Memory = '{}';
+        const ticks = 10;
         for(let time = 0; time < ticks; ++time) {
+            Memory = JSON.parse(Memory);
             OS.init(Memory, time);
             OS.core("M10", 10, Monitor);
             OS.core("M50", 50, Monitor);
             OS.execute();
-            Memory = JSON.parse(JSON.stringify(Memory));
+            console.log(OS.ps());
+            Memory = JSON.stringify(Memory);
         }
-        //console.log(sos.Kernel().dump());
     });
 })();
