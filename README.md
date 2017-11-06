@@ -1,4 +1,4 @@
-# ScreepsOS
+# ScreepsOS [![Build Status](https://travis-ci.org/screepers/ScreepsOS.svg?branch=master)](https://travis-ci.org/screepers/ScreepsOS)
 
 ## Screeps/Serializable Operating System (SOS)
 
