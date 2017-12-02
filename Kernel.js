@@ -145,7 +145,8 @@ const SOS_MODULE = (()=>{
         _this._parent   = oscfg.parent;
         _this._pid      = oscfg.pid;
         _this._children = (oscfg.children || []).map(pid => pid);
-        _this._memory   = (oscfg.memory);
+        _this._memory   = oscfg.memory;
+        _this._tree     = oscfg.tree || (()=>(''));
 
         // System clock sharing
         this.clock = oscfg.clock;
@@ -172,6 +173,8 @@ const SOS_MODULE = (()=>{
         
         get label()     { return this.memory._label;        }
         set label(str)  { this.memory._label = str + '';    }
+        
+        get tree()      { return this[_private]._tree();    }
 
         /// Default run(), prints process memory
         run() {
@@ -230,9 +233,8 @@ const SOS_MODULE = (()=>{
                 if(!row) return;
                 
                 const entry = entryUnpack(row);
-                const _ps = entry.memory._label ? `"${entry.memory._label}"` : '';
-                const header = (end ? '`-- ' : '|-- ') +
-                    `${entry.typeName}:${pid} ${_ps}\n`;
+                const label = entry.memory._label ? ` "${entry.memory._label}"` : '';
+                const header = (end ? '`-- ' : '|-- ') + `${entry.typeName}:${pid}${label}\n`;
                 out += prefix;
                 out += header;
 
@@ -495,7 +497,7 @@ const SOS_MODULE = (()=>{
             heap = (()=>{
                 // Reset needed
                 if(isNaN(heap.t) || (tick !== 1 + heap.t) || !heap.ok || !heap.hdd_image) {
-                    dbg_do(console.log, 'heap reset, old=', heap);
+                    dbg_do(console.log, 'heap reset, old =', heap);
                     _this._RAM.set({});
                     heap = _this._RAM.get();
                     if(!heap)
@@ -586,7 +588,8 @@ const SOS_MODULE = (()=>{
                     memory:     entry.memory,
                     clock:      _this._clock,
                     quota:      _this._quota,
-                    priority:   entry.priority
+                    priority:   entry.priority,
+                    tree:       (()=>(drawTree(table, entry.pid)))
                 }));
                 
                 // priority = f(priority, duration, skipped)
@@ -775,7 +778,7 @@ const SOS_MODULE = (()=>{
                 } else { throw result.err; }
             }
             
-            /// @returns minimal copy of processes table
+            /// @returns minimal copy of processes table TODO
             _ps(memory) {
                 const table = memory.table;
                 const result = {};
@@ -806,8 +809,6 @@ const SOS_MODULE = (()=>{
                 const toKill = _this._toKill || (_this._toKill = []);
                 toKill.push(pid);
             }
-            
-            
         }
         
         return Kernel;

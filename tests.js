@@ -78,7 +78,6 @@ function ackermann_test() {
 
     // Makes closure with Process type and utility stuff
     const makeAckermann = ((m, n, resultHolder)=>{
-        let mainPID = undefined;
 
         // Job coroutine
         const processJob = function*(xm, xn) {
@@ -119,16 +118,19 @@ function ackermann_test() {
                 if(!this.label)
                     this.label = `A(${memory.m},${memory.n})`;
 
-                if(memory.main && memory.result) {
-                    resultHolder.result = memory.result;
-                    console.log(`FINISHED: A(${memory.m},${memory.n})=${memory.result}`);
-                    return new K.SYSCALL.Kill();
-                }
-
                 if(memory.die) {
                     //console.log(`TEMPORARY: A(${memory.m},${memory.n})=${memory.result}`);
                     //return new K.SYSCALL.Sleep(999999);
                     return new K.SYSCALL.Kill();
+                }
+                
+                if(memory.result) {
+                    if(memory.main) {
+                        resultHolder.result = memory.result;
+                        console.log(`FINISHED: A(${memory.m},${memory.n})=${memory.result}`);
+                        return new K.SYSCALL.Kill();
+                    }
+                    return;
                 }
 
                 // = n+1, end of recursion
@@ -158,12 +160,10 @@ function ackermann_test() {
         }
 
         return {
-            launched: (()=>(!!mainPID)),
             cfg: {
                 type:       Ackermann,
                 memory:     {m:m, n:n, main:1},
-                priority:   0,
-                callback:   ((pid)=>(mainPID = pid))
+                priority:   0
             }
         };
     });
@@ -185,15 +185,15 @@ function ackermann_test() {
         return holder.result;
     });
     
-    const fun = ((m,n)=>(
+    const ackFun = ((m,n)=>(
         m === 0 ? (n + 1) :
-        n === 0 ? fun(m - 1, 1) : fun(m - 1, fun(m, n - 1))
+        n === 0 ? ackFun(m - 1, 1) : ackFun(m - 1, ackFun(m, n - 1))
     ));
     
     const [M, N] = [4, 4];
     for(let m = 0; m < M; ++m) {
         for(let n = 0; n < N; ++n) {
-            const r1 = fun(m, n);
+            const r1 = ackFun(m, n);
             const r2 = singleTest(m, n);
             if(r1 !== r2) {
                 const msg = `ackermann_test fails\nr1=${r1}\nr2=${r2}`;
@@ -202,8 +202,6 @@ function ackermann_test() {
             }
         }
     }
-    
-    singleTest(3,3);
 }
 
 (function main() {
