@@ -73,8 +73,14 @@ const SOS_MODULE = (()=>{
 
 
     /// Uses for private fields encapsulating
-    const _private = Symbol('_PRIVATE_');
-    const defineProperty = Object.defineProperty;
+    const   _private        = Symbol('_PRIVATE_'),
+            defineProperty  = Object.defineProperty;
+    
+    
+    /// Some utility encapsulation
+    const   Object_keys     = Object.keys,
+            JSON_parse      = JSON.parse,
+            JSON_stringify  = JSON.stringify;
 
 
     /// Common OS errors
@@ -179,7 +185,7 @@ const SOS_MODULE = (()=>{
         /// Default run(), prints process memory
         run() {
             const typeName = this[_private]._typeName;
-            const jsonMem = JSON.stringify(this.memory);
+            const jsonMem = JSON_stringify(this.memory);
             console.log(`${typeName}:${this.pid}, memory=${jsonMem}:`);
         }
     }
@@ -475,7 +481,7 @@ const SOS_MODULE = (()=>{
                 task.done = true;
                 try { // Bulletproof shell
                     console.log(`Thread ${entry.typeName}:${entry.pid} runtime error: `,
-                        err, err.name, err.message);
+                        err, err.name, err.message, err.stack);
                     task.error = err.message + '';
                 } finally {
                     task.error = task.error || 'UNKNOWN ERROR';
@@ -553,7 +559,7 @@ const SOS_MODULE = (()=>{
             const processes = heap.processes || (heap.processes = {});
 
             // All existing PIDs
-            const pids_list = Object.keys(table);
+            const pids_list = Object_keys(table);
 
             const effective_priority = (()=>{
                 const user_avg = (heap.hdd_image.user_dt || 0.001)/pids_list.length;
@@ -778,26 +784,31 @@ const SOS_MODULE = (()=>{
                 } else { throw result.err; }
             }
             
-            /// @returns minimal copy of processes table TODO
-            _ps(memory) {
-                const table = memory.table;
+            /// @returns minimal copy of processes table.
+            /// @param memory - raw object containing "table" property (optional, reads ROM if not present).
+            /// NOTE: pretty heavy due to JSON.stringify/parse under the hood.
+            ps(memory) {
+                memory = memory || (this[_private]._ROM.get() || {});
+                const table = JSON_parse(JSON_stringify(memory.table || {}));
                 const result = {};
-                for(const [pid, row] of Object.entries(table)) {
+                Object_keys(table).forEach((pid)=>{
+                    const row = table[pid];
                     const entry = entryUnpack(row);
                     result[entry.pid] = {
                         pid:       +pid,
                         priority:  +entry.priority,
                         process:    entry.typeName + '',
                         parent:    +entry.parent,
-                        children:   entry.children.map(pid => +pid)
+                        children:   entry.children.map(pid => +pid),
+                        label:      entry.memory._label + ''
                     };
-                }
+                });
                 return result;
             }
 
             createProcess(cfg) {
                 cfg = cfg || {};
-                cfg.priority = Object.hasOwnProperty('priority') ? cfg.priority : 50;
+                cfg.priority = cfg.hasOwnProperty('priority') ? cfg.priority : 50;
                 
                 const _this = this[_private];
                 const toBorn = _this._toBorn || (_this._toBorn = []);
@@ -815,10 +826,10 @@ const SOS_MODULE = (()=>{
     })();
     
     return {
-        Storage:    Storage,
-        Process:    Process,
-        SYSCALL:    SYSCALL,
-        Kernel:     Kernel
+        Storage,
+        Process,
+        SYSCALL,
+        Kernel
     };
     
 })();

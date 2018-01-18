@@ -179,8 +179,10 @@ function ackermann_test() {
         kernel.createProcess(Algo.cfg);
 
         const ticksLimit = 10000;
-        for(let t = 0; (t < ticksLimit) && !holder.result; ++t)
+        for(let t = 0; (t < ticksLimit) && !holder.result; ++t) {
             kernel.execute();
+            //if(t % 100 === 0) console.log(kernel.ps());
+        }
 
         return holder.result;
     });
